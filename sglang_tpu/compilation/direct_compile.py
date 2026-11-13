@@ -35,6 +35,7 @@ from sglang.srt.speculative.eagle_info import (
 from sglang_tpu.attention_pallas_rpa_base import (
     PallasForwardMetadata,
 )
+from sglang_tpu.compilation import stablehlo_export
 from sglang_tpu.compilation.graph_identity import _key_value, canonical, digest
 from sglang_tpu.compilation.pending_call import PendingCall
 from sglang_tpu.compilation.pp_proxy_pytree import (
@@ -429,6 +430,7 @@ class CompiledFunction:
                 async_compile=async_compile,
                 spmd_compiler=spmd_compiler,
                 graph=graph,
+                specialization=repr(key),
             )
             if (
                 spmd_compiler is not None
@@ -447,6 +449,7 @@ class CompiledFunction:
         async_compile: bool = False,
         spmd_compiler: SPMDCompiler | None = None,
         graph: str | None = None,
+        specialization: str = "",
     ) -> _CompiledArtifact:
         """Compile one specialization into a PJRT executable."""
 
@@ -737,6 +740,21 @@ class CompiledFunction:
             )
 
         live_model_indices = tuple(range(model_input_count))
+        export_root = stablehlo_export.export_dir()
+        export_labels = (
+            self._export_input_labels(
+                graph_inputs=graph_inputs,
+                registered_model_inputs=registered_model_inputs,
+                extra_model_inputs=extra_model_inputs,
+                rank_input_index=rank_input_index,
+                model_input_count=model_input_count,
+                kv_pool_input_stop=kv_pool_input_stop,
+                tensor_inputs_key_paths=tensor_inputs_key_paths,
+            )
+            if export_root is not None
+            else []
+        )
+
         if self._prune_unused_inputs:
             # Only immutable model state can be dropped. Keep every explicit input
             # (and its runtime shape check), KV input/output, and callback output.
@@ -751,6 +769,8 @@ class CompiledFunction:
             )
             model_inputs = [model_inputs[index] for index in live_model_indices]
             graph_inputs = [graph_inputs[index] for index in retained_indices]
+            if export_labels:
+                export_labels = [export_labels[index] for index in retained_indices]
             flat_inputs = [
                 flat_inputs[index]
                 for index in retained_indices
@@ -760,6 +780,22 @@ class CompiledFunction:
                 "[direct_compile] retained %d/%d model inputs",
                 len(model_inputs),
                 model_input_count,
+            )
+
+        if export_root is not None:
+            stablehlo_export.export_specialization(
+                out_dir=export_root,
+                graph_name=self._name or self.fn.__name__,
+                specialization=specialization,
+                result_tensors=result_tensors,
+                graph_inputs=graph_inputs,
+                input_labels=export_labels,
+                output_counts={
+                    "outputs": len(output_leaves),
+                    "kv_pool_mutations": len(kv_pool_inputs),
+                    "callbacks": len(inserted_callbacks),
+                    "rng_state": int(rng_output is not None),
+                },
             )
 
         # Step 4: Finish lowering to MLIR, then compile it.
@@ -854,6 +890,40 @@ class CompiledFunction:
             pending_compile=pending_compile,
             rng_device=rng_device,
         )
+
+    @staticmethod
+    def _export_input_labels(
+        *,
+        graph_inputs: list[torch.Tensor],
+        registered_model_inputs: list[tuple[str, int]],
+        extra_model_inputs: list[tuple[object, str, int]],
+        rank_input_index: int | None,
+        model_input_count: int,
+        kv_pool_input_stop: int,
+        tensor_inputs_key_paths: list[tree_util.KeyPath],
+    ) -> list[dict]:
+        """Name every graph input in @main argument order for the export manifest."""
+        names: dict[int, tuple[str, str]] = {}
+        for name, index in registered_model_inputs:
+            names.setdefault(index, ("parameter", name))
+        for _parent, attr_name, index in extra_model_inputs:
+            names.setdefault(index, ("model_extra", attr_name))
+        if rank_input_index is not None:
+            names[rank_input_index] = ("rank", "rank")
+        for index in range(model_input_count, kv_pool_input_stop):
+            names[index] = ("kv_pool", f"kv_pool[{index - model_input_count}]")
+        for offset, path in enumerate(tensor_inputs_key_paths):
+            names[kv_pool_input_stop + offset] = (
+                "user_input",
+                tree_util.keystr(path),
+            )
+        labels = []
+        for index, tensor in enumerate(graph_inputs):
+            kind, name = names.get(index, ("rng_state", "rng_state"))
+            labels.append(
+                stablehlo_export.input_label(kind=kind, name=name, tensor=tensor)
+            )
+        return labels
 
 
 def _tensor_specs(tensors: Sequence[torch.Tensor]) -> tuple[InputSpec, ...]:
