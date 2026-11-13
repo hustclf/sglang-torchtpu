@@ -8,7 +8,7 @@ core readers move; never declare one name in both registries.
 
 from __future__ import annotations
 
-from sglang.srt.environ import EnvBool, EnvField, EnvFloat, EnvInt, EnvTuple
+from sglang.srt.environ import EnvBool, EnvField, EnvFloat, EnvInt, EnvStr, EnvTuple
 
 __all__ = ["TpuEnvs", "envs"]
 
@@ -52,6 +52,12 @@ class TpuEnvs:
     # of MB.
     SGLANG_TPU_ENABLE_PROFILE_AUTO = EnvBool(False)
     SGLANG_TPU_PROFILE_AUTO_STEPS = EnvInt(5)
+    # Write every direct_compile specialization as StableHLO plus an input
+    # manifest into this directory (compilation/stablehlo_export.py). Unset: off.
+    SGLANG_TPU_EXPORT_STABLEHLO_DIR = EnvStr(None)
+    # Exit the process after this many exported graphs, before warmup executes
+    # them. 0 keeps serving.
+    SGLANG_TPU_EXPORT_STABLEHLO_EXIT_AFTER = EnvInt(0)
     # Kimi-K3: run attention-residual aggregation for decode-sized batches as
     # one Pallas kernel (pending add + mix + out norm) instead of the torch
     # reference (see kimi_attn_residual.py and hooks/attn_residual.py). Not
