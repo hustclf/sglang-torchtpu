@@ -38,7 +38,14 @@ from sglang.srt.models.qwen2 import Qwen2Model
 from sglang.srt.models.utils import apply_qk_norm
 from sglang.srt.platforms import current_platform
 from sglang.srt.runtime_context import get_exec, get_parallel, get_stream
-from sglang.srt.utils import add_prefix, get_bool_env_var, is_cuda, is_hip, is_npu
+from sglang.srt.utils import (
+    add_prefix,
+    get_bool_env_var,
+    is_cuda,
+    is_hip,
+    is_npu,
+    is_tpu,
+)
 
 Qwen3Config = None
 
@@ -46,6 +53,7 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_npu = is_npu()
+_is_tpu = is_tpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 _has_fused_qk_norm_mrope = False
@@ -158,6 +166,26 @@ class Qwen3Attention(nn.Module):
         )
         self.alt_stream = alt_stream
 
+        # TPU fused q/k RMSNorm + RoPE (same gating as qwen3_moe.py).
+        self.use_tpu_fused_qk_norm_rope = False
+        if (
+            get_exec().kernel.enable_fused_qk_norm_rope
+            and _is_tpu
+            and not isinstance(self.rotary_emb, MRotaryEmbedding)
+        ):
+            from sglang_tpu.qk_norm_rope import (
+                can_use_tpu_fused_qk_norm_rope,
+                register_tpu_qk_norm_rope_op,
+            )
+
+            self.use_tpu_fused_qk_norm_rope = can_use_tpu_fused_qk_norm_rope(
+                rotary_emb=self.rotary_emb,
+                dtype=torch.bfloat16,
+                head_dim=self.head_dim,
+            )
+            if self.use_tpu_fused_qk_norm_rope:
+                register_tpu_qk_norm_rope_op()
+
         self.use_fused_qk_norm_mrope = (
             _has_fused_qk_norm_mrope
             and isinstance(self.rotary_emb, MRotaryEmbedding)
@@ -173,6 +201,20 @@ class Qwen3Attention(nn.Module):
 
     def forward_prepare_native(self, positions, hidden_states):
         qkv, _ = self.qkv_proj(hidden_states)
+        if self.use_tpu_fused_qk_norm_rope and qkv.dtype == torch.bfloat16:
+            from sglang_tpu.qk_norm_rope import tpu_fused_qk_norm_rope
+
+            return tpu_fused_qk_norm_rope(
+                qkv,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.q_norm.variance_epsilon,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+            )
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = apply_qk_norm(
             q=q,
