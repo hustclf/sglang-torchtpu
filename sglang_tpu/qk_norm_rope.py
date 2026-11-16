@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 # 256 bounds per-program VMEM for large compiled token buckets. This is still
 # not tuned. It would be worthwhile to tune
 # if this kernel ever accounts for a large enough share of step time to matter.
-_MAX_BLOCK_TOKENS = 256
+_MAX_BLOCK_TOKENS = 64
 
 
 def _rms(x: "jax.Array", weight: "jax.Array", eps: float) -> "jax.Array":
