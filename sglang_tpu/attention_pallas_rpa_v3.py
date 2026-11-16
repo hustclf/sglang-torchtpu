@@ -57,6 +57,12 @@ def _invoke_v3_kernel(
     decode_query_size=1,
     use_causal_mask=True,
 ):
+    import os
+
+    # Experiment: SGLANG_TPU_RPA_D_BLOCK="bq,bkv,bq_csz,bkv_csz" overrides the
+    # decode block sizes (default: kernel heuristic).
+    _d = os.environ.get("SGLANG_TPU_RPA_D_BLOCK")
+    d_block_sizes = tuple(int(x) for x in _d.split(",")) if _d else None
     return jax_rpa(
         queries,
         keys,
@@ -76,6 +82,7 @@ def _invoke_v3_kernel(
         k_scale=k_scale,
         v_scale=v_scale,
         decode_query_size=decode_query_size,
+        d_block_sizes=d_block_sizes,
     )
 
 
